@@ -1,0 +1,77 @@
+name: Convert TS to MP4 from Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_url:
+        description: 'GitHub Release URL (例: https://github.com/owner/repo/releases/tag/v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse Release URL
+        id: parse_url
+        run: |
+          URL="${{ inputs.release_url }}"
+          # URLから owner/repo と tag を抽出
+          # フォーマット: https://github.com/<owner>/<repo>/releases/tag/<tag>
+          if [[ $URL =~ https://github.com/([^/]+)/([^/]+)/releases/tag/(.+) ]]; then
+            REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+            TAG="${BASH_REMATCH[3]}"
+            echo "target_repo=$REPO" >> "$GITHUB_OUTPUT"
+            echo "target_tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "Target Repo: $REPO"
+            echo "Target Tag: $TAG"
+          else
+            echo "::error::ReleaseのURL形式が正しくありません (形式: https://github.com/<owner>/<repo>/releases/tag/<tag>)"
+            exit 1
+          fi
+
+      - name: Download .ts files from Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p input_ts
+          # 対象Releaseから拡張子が .ts のアセットを一括ダウンロード
+          gh release download "${{ steps.parse_url.outputs.target_tag }}" \
+            --repo "${{ steps.parse_url.outputs.target_repo }}" \
+            --pattern "*.ts" \
+            --dir input_ts
+
+      - name: Convert .ts to .mp4
+        run: |
+          mkdir -p output_mp4
+
+          # 各 .ts ファイルを .mp4 に変換
+          for ts_file in input_ts/*.ts; do
+            # ファイルが存在しない場合のガード
+            [ -e "$ts_file" ] || continue
+
+            filename=$(basename "$ts_file")
+            basename_no_ext="${filename%.*}"
+            output_file="output_mp4/${basename_no_ext}.mp4"
+
+            echo "変換中: $filename -> ${basename_no_ext}.mp4"
+
+            # -c copy で再エンコードなし（無劣化・超高速）でコンテナのみmp4に変換
+            ffmpeg -i "$ts_file" -c copy "$output_file"
+          done
+
+      - name: Upload .mp4 files to a new Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 保存用の一意なReleaseタグを生成（元のtag名 + タイムスタンプ）
+          NEW_TAG="mp4-${{ steps.parse_url.outputs.target_tag }}-$(date +%Y%m%d%H%M%S)"
+
+          echo "新規Release ($NEW_TAG) を作成してmp4をアップロードします..."
+
+          gh release create "$NEW_TAG" output_mp4/*.mp4 \
+            --title "Converted MP4 (${{ steps.parse_url.outputs.target_tag }})" \
+            --notes "元Release: ${{ inputs.release_url }} から変換されたmp4ファイルです。"
