@@ -15,6 +15,10 @@ jobs:
   convert:
     runs-on: ubuntu-latest
     steps:
+      # Gitリポジトリを初期化するためにチェックアウトを追加
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install FFmpeg
         run: |
           sudo apt-get update
@@ -24,7 +28,6 @@ jobs:
         id: parse_url
         run: |
           URL="${{ inputs.release_url }}"
-          # フォーマット: https://github.com/<owner>/<repo>/releases/tag/<tag>
           if [[ $URL =~ https://github.com/([^/]+)/([^/]+)/releases/tag/(.+) ]]; then
             REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
             TAG="${BASH_REMATCH[3]}"
@@ -46,7 +49,10 @@ jobs:
           NEW_TAG="mp4-${TARGET_TAG}-$(date +%Y%m%d%H%M%S)"
 
           echo "アップロード先の新規Release ($NEW_TAG) を作成します..."
+          # --repo と --target を明示してReleaseを作成
           gh release create "$NEW_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "${{ github.sha }}" \
             --title "Converted MP4 (${TARGET_TAG})" \
             --notes "元Release: ${{ inputs.release_url }} から変換されたmp4ファイルです。"
 
@@ -87,7 +93,7 @@ jobs:
 
             # 3. 先に作成したReleaseへアップロード
             echo "アップロード中: $mp4_file"
-            gh release upload "$DEST_TAG" "$mp4_file"
+            gh release upload "$DEST_TAG" "$mp4_file" --repo "$GITHUB_REPOSITORY"
 
             # 4. ディスク容量解放（元のtsと変換したmp4を即座に削除）
             rm -f "$filename" "$mp4_file"
