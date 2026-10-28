@@ -15,11 +15,15 @@ jobs:
   convert:
     runs-on: ubuntu-latest
     steps:
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
       - name: Parse Release URL
         id: parse_url
         run: |
           URL="${{ inputs.release_url }}"
-          # URLから owner/repo と tag を抽出
           # フォーマット: https://github.com/<owner>/<repo>/releases/tag/<tag>
           if [[ $URL =~ https://github.com/([^/]+)/([^/]+)/releases/tag/(.+) ]]; then
             REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
@@ -33,45 +37,62 @@ jobs:
             exit 1
           fi
 
-      - name: Download .ts files from Release
+      - name: Create Target Release
+        id: create_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p input_ts
-          # 対象Releaseから拡張子が .ts のアセットを一括ダウンロード
-          gh release download "${{ steps.parse_url.outputs.target_tag }}" \
-            --repo "${{ steps.parse_url.outputs.target_repo }}" \
-            --pattern "*.ts" \
-            --dir input_ts
+          TARGET_TAG="${{ steps.parse_url.outputs.target_tag }}"
+          NEW_TAG="mp4-${TARGET_TAG}-$(date +%Y%m%d%H%M%S)"
 
-      - name: Convert .ts to .mp4
-        run: |
-          mkdir -p output_mp4
-
-          # 各 .ts ファイルを .mp4 に変換
-          for ts_file in input_ts/*.ts; do
-            # ファイルが存在しない場合のガード
-            [ -e "$ts_file" ] || continue
-
-            filename=$(basename "$ts_file")
-            basename_no_ext="${filename%.*}"
-            output_file="output_mp4/${basename_no_ext}.mp4"
-
-            echo "変換中: $filename -> ${basename_no_ext}.mp4"
-
-            # -c copy で再エンコードなし（無劣化・超高速）でコンテナのみmp4に変換
-            ffmpeg -i "$ts_file" -c copy "$output_file"
-          done
-
-      - name: Upload .mp4 files to a new Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # 保存用の一意なReleaseタグを生成（元のtag名 + タイムスタンプ）
-          NEW_TAG="mp4-${{ steps.parse_url.outputs.target_tag }}-$(date +%Y%m%d%H%M%S)"
-
-          echo "新規Release ($NEW_TAG) を作成してmp4をアップロードします..."
-
-          gh release create "$NEW_TAG" output_mp4/*.mp4 \
-            --title "Converted MP4 (${{ steps.parse_url.outputs.target_tag }})" \
+          echo "アップロード先の新規Release ($NEW_TAG) を作成します..."
+          gh release create "$NEW_TAG" \
+            --title "Converted MP4 (${TARGET_TAG})" \
             --notes "元Release: ${{ inputs.release_url }} から変換されたmp4ファイルです。"
+
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Process Files (Download -> Convert -> Upload -> Delete)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ steps.parse_url.outputs.target_repo }}"
+          SRC_TAG="${{ steps.parse_url.outputs.target_tag }}"
+          DEST_TAG="${{ steps.create_release.outputs.new_tag }}"
+
+          # 元Release内の .ts ファイル一覧を取得
+          ts_files=$(gh release view "$SRC_TAG" --repo "$REPO" --json assets --jq '.assets[] | select(.name | endswith(".ts")) | .name')
+
+          if [ -z "$ts_files" ]; then
+            echo "::warning::.ts ファイルが見つかりませんでした。"
+            exit 0
+          fi
+
+          # 1ファイルずつループ処理
+          while IFS= read -r filename; do
+            [ -z "$filename" ] && continue
+            echo "=========================================="
+            echo "開始: $filename"
+
+            # 1. 1ファイルのみダウンロード
+            gh release download "$SRC_TAG" --repo "$REPO" --pattern "$filename" --dir .
+
+            # 出力ファイル名 (.ts -> .mp4)
+            basename_no_ext="${filename%.*}"
+            mp4_file="${basename_no_ext}.mp4"
+
+            # 2. mp4に変換 (無劣化・高速)
+            echo "変換中: $filename -> $mp4_file"
+            ffmpeg -i "$filename" -c copy "$mp4_file"
+
+            # 3. 先に作成したReleaseへアップロード
+            echo "アップロード中: $mp4_file"
+            gh release upload "$DEST_TAG" "$mp4_file"
+
+            # 4. ディスク容量解放（元のtsと変換したmp4を即座に削除）
+            rm -f "$filename" "$mp4_file"
+            echo "クリーンアップ完了: $filename, $mp4_file"
+          done <<< "$ts_files"
+
+          echo "=========================================="
+          echo "すべてのファイルの変換とアップロードが完了しました。"
