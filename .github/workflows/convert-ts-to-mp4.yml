@@ -64,7 +64,6 @@ jobs:
           SRC_TAG="${{ steps.parse_url.outputs.target_tag }}"
           DEST_TAG="${{ steps.create_release.outputs.new_tag }}"
 
-          # 元Release内の .ts ファイル一覧を取得
           ts_files=$(gh release view "$SRC_TAG" --repo "$REPO" --json assets --jq '.assets[] | select(.name | endswith(".ts")) | .name')
 
           if [ -z "$ts_files" ]; then
@@ -72,28 +71,50 @@ jobs:
             exit 0
           fi
 
-          # 記述子3から読み込むことで stdin の競合を防止
           while IFS= read -u 3 -r filename; do
             [ -z "$filename" ] && continue
             echo "=========================================="
             echo "開始: $filename"
 
-            # 1. 1ファイルのみダウンロード
+            # 1. ダウンロード
             gh release download "$SRC_TAG" --repo "$REPO" --pattern "$filename" --dir .
 
-            # 出力ファイル名 (.ts -> .mp4)
             basename_no_ext="${filename%.*}"
             mp4_file="${basename_no_ext}.mp4"
 
-            # 2. mp4に変換 (-nostdin と < /dev/null でstdin吸い取りを防止)
-            echo "変換中: $filename -> $mp4_file"
-            ffmpeg -nostdin -i "$filename" -c copy "$mp4_file" < /dev/null
+            echo "無劣化ストリームコピー変換中: $filename -> $mp4_file"
 
-            # 3. 先に作成したReleaseへアップロード
+            # 2. -f mpegts を明示指定して誤認識を防ぎつつ、-c copy で無劣化変換
+            #    また -bsf:a aac_adtstoasc でMP4標準のAACビットストリームに整流
+            if ! ffmpeg -nostdin -f mpegts -i "$filename" \
+              -c copy \
+              -bsf:a aac_adtstoasc \
+              -movflags +faststart \
+              "$mp4_file" -y < /dev/null; then
+
+              echo "::warning::-f mpegts 直接指定で失敗したため、TSヘッダー(0x47)のオフセット補正を試みます..."
+              # 先頭にPNGヘッダーなどのダミーデータがある場合、TS同期バイト(0x47)の位置を探して切り詰める
+              offset=$(grep -b -o -a -P '\x47' "$filename" | head -n 1 | cut -d: -f1)
+              if [ -n "$offset" ] && [ "$offset" -gt 0 ]; then
+                echo "TS同期バイトをオフセット $offset で検出。ダミーヘッダーを除去して再試行します。"
+                tail -c +$((offset + 1)) "$filename" > clean.ts
+                ffmpeg -nostdin -f mpegts -i clean.ts \
+                  -c copy \
+                  -bsf:a aac_adtstoasc \
+                  -movflags +faststart \
+                  "$mp4_file" -y < /dev/null
+                rm -f clean.ts
+              else
+                echo "::error::MPEG-TSとしての解析に失敗しました。"
+                exit 1
+              fi
+            fi
+
+            # 3. アップロード
             echo "アップロード中: $mp4_file"
             gh release upload "$DEST_TAG" "$mp4_file" --repo "$GITHUB_REPOSITORY"
 
-            # 4. ディスク容量解放
+            # 4. ディスククリーンアップ
             rm -f "$filename" "$mp4_file"
             echo "クリーンアップ完了: $filename, $mp4_file"
           done 3<<< "$ts_files"
