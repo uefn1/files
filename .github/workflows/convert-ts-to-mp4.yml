@@ -15,7 +15,6 @@ jobs:
   convert:
     runs-on: ubuntu-latest
     steps:
-      # Gitリポジトリを初期化するためにチェックアウトを追加
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -49,7 +48,6 @@ jobs:
           NEW_TAG="mp4-${TARGET_TAG}-$(date +%Y%m%d%H%M%S)"
 
           echo "アップロード先の新規Release ($NEW_TAG) を作成します..."
-          # --repo と --target を明示してReleaseを作成
           gh release create "$NEW_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --target "${{ github.sha }}" \
@@ -74,8 +72,8 @@ jobs:
             exit 0
           fi
 
-          # 1ファイルずつループ処理
-          while IFS= read -r filename; do
+          # 記述子3から読み込むことで stdin の競合を防止
+          while IFS= read -u 3 -r filename; do
             [ -z "$filename" ] && continue
             echo "=========================================="
             echo "開始: $filename"
@@ -87,18 +85,18 @@ jobs:
             basename_no_ext="${filename%.*}"
             mp4_file="${basename_no_ext}.mp4"
 
-            # 2. mp4に変換 (無劣化・高速)
+            # 2. mp4に変換 (-nostdin と < /dev/null でstdin吸い取りを防止)
             echo "変換中: $filename -> $mp4_file"
-            ffmpeg -i "$filename" -c copy "$mp4_file"
+            ffmpeg -nostdin -i "$filename" -c copy "$mp4_file" < /dev/null
 
             # 3. 先に作成したReleaseへアップロード
             echo "アップロード中: $mp4_file"
             gh release upload "$DEST_TAG" "$mp4_file" --repo "$GITHUB_REPOSITORY"
 
-            # 4. ディスク容量解放（元のtsと変換したmp4を即座に削除）
+            # 4. ディスク容量解放
             rm -f "$filename" "$mp4_file"
             echo "クリーンアップ完了: $filename, $mp4_file"
-          done <<< "$ts_files"
+          done 3<<< "$ts_files"
 
           echo "=========================================="
           echo "すべてのファイルの変換とアップロードが完了しました。"
